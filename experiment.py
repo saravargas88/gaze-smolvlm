@@ -134,8 +134,13 @@ def run_one(
         # ── Capture image features via hook (works on all transformers versions)
         image_hidden_states = capture_image_features(model, inputs)  # (n_tiles, 64, 576)
 
+        # ── Infer actual tile layout from captured features ──────────────────
+        n_actual_tiles = image_hidden_states.shape[0]   # e.g. 17
+        n_local        = n_actual_tiles - 1              # subtract global tile
+        n_local_side   = max(1, int(n_local ** 0.5))     # e.g. sqrt(16) = 4
+
         # ── Tile selection by gaze ───────────────────────────────────────────
-        pruner = TilePruner(n_local_tiles_side=4, keep_ratio=keep_ratio)
+        pruner = TilePruner(n_local_tiles_side=n_local_side, keep_ratio=keep_ratio)
         pruned_states, new_ids, new_mask, kept = pruner.prune(
             image_hidden_states=image_hidden_states,
             input_ids=inputs["input_ids"],
@@ -145,8 +150,8 @@ def run_one(
             gaze_y=gaze_y,
         )
         gen_inputs = dict(
-            input_ids=new_ids,
-            attention_mask=new_mask,
+            input_ids=new_ids.to(device),
+            attention_mask=new_mask.to(device),
             image_hidden_states=pruned_states.to(device),
         )
         seq_len    = new_ids.shape[-1]
@@ -248,7 +253,7 @@ def main():
             gx_px = gaze_df.loc[frame_num, "x"]
             gy_px = gaze_df.loc[frame_num, "y"]
         else:
-            gx_px, gy_px = FRAME_W / 2, FRAME_H / 2   # fallback: center
+            gx_px, gy_px = ARIA_W / 2, ARIA_H / 2   # fallback: center
 
         gx_norm = float(min(max(gx_px / ARIA_W, 0.0), 1.0))
         gy_norm = float(min(max(gy_px / ARIA_H, 0.0), 1.0))
@@ -295,9 +300,8 @@ def main():
             "ms_per_token": "avg_ms_per_tok",
         })
     )
-    summary["speedup_vs_baseline"] = (
-        summary["avg_time_s"].iloc[-1] / summary["avg_time_s"]
-    ).round(2)
+    baseline_time = summary.loc[1.0, "avg_time_s"]
+    summary["speedup_vs_baseline"] = (baseline_time / summary["avg_time_s"]).round(2)
     print("\n===== SUMMARY (averaged over frames) =====")
     print(summary.to_string())
     print(f"\nFull results saved → {RESULTS_PATH}")
