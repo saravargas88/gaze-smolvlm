@@ -101,10 +101,10 @@ def run_one(
     if keep_ratio < 1.0:
         # ── Vision encoder ──────────────────────────────────────────────────
         with torch.no_grad():
-            image_hidden_states = model.model.get_image_features(
+            image_hidden_states = model.model.vision_model(
                 pixel_values=inputs["pixel_values"].to(torch.float16),
                 pixel_attention_mask=inputs["pixel_attention_mask"],
-            ).pooler_output                       # (n_tiles, 64, 576)
+            ).last_hidden_state                      # (n_tiles, 64, 576)
 
         # ── Tile selection by gaze ───────────────────────────────────────────
         pruner = TilePruner(n_local_tiles_side=4, keep_ratio=keep_ratio)
