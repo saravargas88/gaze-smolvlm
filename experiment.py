@@ -58,29 +58,36 @@ RESULTS_PATH = "results/preliminary_experiment.csv"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def encode_images(model, pixel_values: torch.Tensor) -> torch.Tensor:
+def capture_image_features(model, inputs: dict) -> torch.Tensor:
     """
-    Vision encoder + connector, compatible with all transformers versions.
+    Capture connector output via a forward hook on the working generate path.
 
-    Runs vision_model + connector directly without a patch_attention_mask —
-    for a real (non-padded) image all patches are valid so no mask is needed.
+    Instead of calling vision_model directly (which crashes on some versions),
+    we hook into model.model.connector and fire a 1-token generate pass.
+    This uses the identical code path as the baseline, so it always works.
 
     Returns shape: (n_tiles, tokens_per_tile, llm_hidden_dim)  e.g. (17, 64, 576)
     """
-    m = model.model   # Idefics3Model
-    batch_size, num_tiles, C, H, W = pixel_values.shape
+    holder = {}
 
-    # Flatten tiles into batch dim
-    pv = pixel_values.to(dtype=torch.float16).view(batch_size * num_tiles, C, H, W)
+    def _hook(module, inp, out):
+        holder["features"] = out.detach().clone()
 
-    # Run SigLIP vision encoder — no patch_attention_mask needed for real images
-    vision_out = m.vision_model(pixel_values=pv, return_dict=True)
+    handle = model.model.connector.register_forward_hook(_hook)
+    with torch.no_grad():
+        model.generate(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            pixel_values=inputs["pixel_values"],
+            pixel_attention_mask=inputs["pixel_attention_mask"],
+            max_new_tokens=1,   # just enough to trigger the vision encoder
+            do_sample=False,
+        )
+    handle.remove()
 
-    # Run connector/projector → LLM hidden dim
-    image_features = m.connector(vision_out.last_hidden_state)
-
-    print(f"  [debug] pixel_values: {pixel_values.shape} → image_features: {image_features.shape}")
-    return image_features   # (n_tiles, 64, 576)
+    features = holder["features"]
+    print(f"  [debug] captured image_features: {features.shape}")
+    return features   # (n_tiles, 64, 576)
 
 
 def get_device() -> str:
@@ -124,12 +131,8 @@ def run_one(
     image_token_id = model.config.image_token_id
 
     if keep_ratio < 1.0:
-        # ── Vision encoder + connector ───────────────────────────────────────
-        with torch.no_grad():
-            image_hidden_states = encode_images(
-                model,
-                inputs["pixel_values"],
-            )                                        # (n_tiles, 64, 576)
+        # ── Capture image features via hook (works on all transformers versions)
+        image_hidden_states = capture_image_features(model, inputs)  # (n_tiles, 64, 576)
 
         # ── Tile selection by gaze ───────────────────────────────────────────
         pruner = TilePruner(n_local_tiles_side=4, keep_ratio=keep_ratio)
