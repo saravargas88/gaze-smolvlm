@@ -1,0 +1,2 @@
+frame,frame_num,gaze_x_px,gaze_y_px,gaze_x_norm,gaze_y_norm,keep_ratio,tiles_kept,tiles_total,vis_tok_kept,vis_tok_total,output_tokens,total_s,ms_per_token,answer
+frame_0001.jpg,0,804.9,791.2,1.0,1.0,1.0,17,17,1088,1088,10,6.9514,695.14,The person is standing and holding a camera.

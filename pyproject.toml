@@ -1,0 +1,36 @@
+[project]
+name = "gaze-smolvlm"
+version = "0.1.0"
+description = "Gaze-guided visual token pruning for on-device SmolVLM inference"
+requires-python = ">=3.11"
+dependencies = [
+    # Core ML
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=5.5.0",
+    "accelerate>=1.13.0",
+    # Fine-tuning
+    "peft>=0.19.0",
+    # Data
+    "datasets>=4.8.0",
+    "Pillow>=10.0.0",
+    "opencv-python>=4.13.0",
+    "numpy>=2.4.0",
+    "einops>=0.8.0",
+    # ONNX
+    "onnx>=1.21.0",
+    "onnxruntime>=1.24.0",
+    # Tokenization / HF
+    "sentencepiece>=0.2.0",
+    "huggingface_hub>=0.26.0",
+    # Utilities
+    "tqdm>=4.0.0",
+    "wandb>=0.26.0",
+    "matplotlib>=3.10.8",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "jupyter",
+]
