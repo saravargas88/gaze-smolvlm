@@ -1,8 +1,5 @@
 # gaze-smolvlm
 
-**Gaze-Guided Acceleration for On-Device SmolVLM Inference**
-
-Julia Gontijo Lopes · Sara Vargas Martínez — Building LLM Reasoners (Spring 2026)
 
 ---
 
