@@ -68,14 +68,10 @@ def encode_images(model, pixel_values: torch.Tensor, pixel_attention_mask: torch
     m = model.model   # Idefics3Model
     batch_size, num_tiles, C, H, W = pixel_values.shape
 
-    # Flatten tiles into batch dim
+    # Flatten tiles into batch dim — skip padding filter since we always
+    # have a single real image (filtering can drop dark tiles and break indexing)
     pv = pixel_values.to(dtype=torch.float16).view(batch_size * num_tiles, C, H, W)
     pm = pixel_attention_mask.view(batch_size * num_tiles, H, W)
-
-    # Drop all-zero (padding) tiles
-    real = (pv == 0.0).sum(dim=(-1, -2, -3)) != pv.shape[1:].numel()
-    pv = pv[real].contiguous()
-    pm = pm[real].contiguous()
 
     # Build patch-level attention mask for the vision transformer
     patch_size = m.config.vision_config.patch_size
