@@ -58,6 +58,39 @@ RESULTS_PATH = "results/preliminary_experiment.csv"
 # Helpers
 # ---------------------------------------------------------------------------
 
+def encode_images(model, pixel_values: torch.Tensor, pixel_attention_mask: torch.Tensor) -> torch.Tensor:
+    """
+    Vision encoder + connector, compatible with all transformers versions.
+    Replicates what Idefics3Model.get_image_features() does internally.
+
+    Returns shape: (n_tiles, tokens_per_tile, llm_hidden_dim)  e.g. (17, 64, 576)
+    """
+    m = model.model   # Idefics3Model
+    batch_size, num_tiles, C, H, W = pixel_values.shape
+
+    # Flatten tiles into batch dim
+    pv = pixel_values.to(dtype=torch.float16).view(batch_size * num_tiles, C, H, W)
+    pm = pixel_attention_mask.view(batch_size * num_tiles, H, W)
+
+    # Drop all-zero (padding) tiles
+    real = (pv == 0.0).sum(dim=(-1, -2, -3)) != pv.shape[1:].numel()
+    pv = pv[real].contiguous()
+    pm = pm[real].contiguous()
+
+    # Build patch-level attention mask for the vision transformer
+    patch_size = m.config.vision_config.patch_size
+    grid = pm.unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size)
+    patch_mask = (grid.sum(dim=(-1, -2)) > 0).bool()
+
+    # Run SigLIP vision encoder
+    vision_out = m.vision_model(
+        pixel_values=pv, patch_attention_mask=patch_mask, return_dict=True
+    )
+    # Run connector/projector → LLM hidden dim
+    image_features = m.connector(vision_out.last_hidden_state)
+    return image_features   # (n_tiles, 64, 576)
+
+
 def get_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
@@ -100,14 +133,12 @@ def run_one(
 
     if keep_ratio < 1.0:
         # ── Vision encoder + connector ───────────────────────────────────────
-        # get_image_features runs vision_model + the connector/projector,
-        # so pooler_output is in the LLM's hidden dim — the correct shape
-        # for passing back as image_hidden_states to generate().
         with torch.no_grad():
-            image_hidden_states = model.model.get_image_features(
-                pixel_values=inputs["pixel_values"].to(torch.float16),
-                pixel_attention_mask=inputs["pixel_attention_mask"],
-            ).pooler_output                          # (n_tiles, 64, 576)
+            image_hidden_states = encode_images(
+                model,
+                inputs["pixel_values"],
+                inputs["pixel_attention_mask"],
+            )                                        # (n_tiles, 64, 576)
 
         # ── Tile selection by gaze ───────────────────────────────────────────
         pruner = TilePruner(n_local_tiles_side=4, keep_ratio=keep_ratio)
