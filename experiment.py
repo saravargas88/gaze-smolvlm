@@ -1,23 +1,26 @@
 """
 Preliminary experiment: Gaze-Guided Tile Pruning on EgoExo4D
 =============================================================
-Take : iiith_cooking_108_5  (cooking activity, 64 extracted frames)
-Gaze : general_eye_gaze_2d.csv  (x, y pixel coords in ego-camera space)
+Supported takes:
+  iiith_cooking_108_5   (cooking activity, 64 extracted frames)
+  nus_cpr_27_3          (CPR activity,     50 extracted frames)
 
 For each sampled frame we run SmolVLM-256M under 4 conditions:
-  keep_ratio = 1.00  → baseline, all 17 tiles
-  keep_ratio = 0.75  → drop 4 of 16 local tiles
-  keep_ratio = 0.50  → drop 8 of 16 local tiles
-  keep_ratio = 0.25  → drop 12 of 16 local tiles  (keep only 4 + global)
+  keep_ratio = 1.00  → baseline, all tiles kept
+  keep_ratio = 0.75  → drop ~25% of local tiles
+  keep_ratio = 0.50  → drop ~50% of local tiles
+  keep_ratio = 0.25  → drop ~75% of local tiles
 
 We measure total decode time and ms/token, and record the model's answer.
 
-Results are saved to results/preliminary_experiment.csv and a summary
+Results are saved to results/<take>_experiment.csv and a summary
 table is printed to stdout.
 
 Usage:
-    uv run python experiment.py
-    uv run python experiment.py --n_frames 4 --prompt "Describe what you see."
+    python experiment.py                          # both takes, all frames
+    python experiment.py --takes iiith_cooking_108_5
+    python experiment.py --takes iiith_cooking_108_5 nus_cpr_27_3
+    python experiment.py --n_frames 8 --prompt "Describe what you see."
 """
 
 import argparse
@@ -35,23 +38,21 @@ from gaze.pruner import TilePruner
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-TAKE          = "iiith_cooking_108_5"
+ALL_TAKES     = ["iiith_cooking_108_5", "nus_cpr_27_3"]
 DATA_ROOT     = "data/egoexo_data/takes"
 MODEL_ID      = "HuggingFaceTB/SmolVLM-256M-Instruct"
 
-# SmolVLM-256M tile layout (fixed by architecture)
-N_TILES_TOTAL    = 17    # 1 global + 4×4 local
-TOKENS_PER_TILE  = 64   # 8×8 after pixel shuffle
-TOTAL_VIS_TOKENS = N_TILES_TOTAL * TOKENS_PER_TILE  # 1 088
+# SmolVLM-256M: 64 tokens per tile (8×8 after pixel shuffle)
+TOKENS_PER_TILE = 64
 
 # Aria RGB camera native resolution — gaze 2D coords are in this space
-# (the extracted JPGs are 796×448 but gaze is projected onto the full 1408×1408 sensor)
+# (extracted frames are 796×448 but gaze is projected onto 1408×1408 sensor)
 ARIA_W = 1408
 ARIA_H = 1408
 
 KEEP_RATIOS = [1.0, 0.75, 0.50, 0.25]
 
-RESULTS_PATH = "results/preliminary_experiment.csv"
+os.makedirs("results", exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +61,13 @@ RESULTS_PATH = "results/preliminary_experiment.csv"
 
 def capture_image_features(model, inputs: dict) -> torch.Tensor:
     """
-    Capture connector output via a forward hook on the working generate path.
+    Capture connector output via a forward hook.
 
-    Instead of calling vision_model directly (which crashes on some versions),
-    we hook into model.model.connector and fire a 1-token generate pass.
-    This uses the identical code path as the baseline, so it always works.
+    We hook into model.model.connector and fire a 1-token generate pass.
+    This uses the identical code path as the baseline and works across
+    transformers versions (tested on 4.49.0).
 
-    Returns shape: (n_tiles, tokens_per_tile, llm_hidden_dim)  e.g. (17, 64, 576)
+    Returns shape: (n_tiles, tokens_per_tile, llm_hidden_dim)  e.g. (13, 64, 576)
     """
     holder = {}
 
@@ -80,14 +81,11 @@ def capture_image_features(model, inputs: dict) -> torch.Tensor:
             attention_mask=inputs["attention_mask"],
             pixel_values=inputs["pixel_values"],
             pixel_attention_mask=inputs["pixel_attention_mask"],
-            max_new_tokens=1,   # just enough to trigger the vision encoder
+            max_new_tokens=1,
             do_sample=False,
         )
     handle.remove()
-
-    features = holder["features"]
-    print(f"  [debug] captured image_features: {features.shape}")
-    return features   # (n_tiles, 64, 576)
+    return holder["features"]   # (n_tiles, 64, 576)
 
 
 def get_device() -> str:
@@ -105,8 +103,6 @@ def load_model(model_id: str, device: str):
         model_id, torch_dtype=torch.float16
     ).to(device)
     model.eval()
-    print(f"  {TOTAL_VIS_TOKENS} visual tokens/image "
-          f"({N_TILES_TOTAL} tiles × {TOKENS_PER_TILE} tok)\n")
     return processor, model
 
 
@@ -131,13 +127,13 @@ def run_one(
     image_token_id = model.config.image_token_id
 
     if keep_ratio < 1.0:
-        # ── Capture image features via hook (works on all transformers versions)
+        # ── Capture image features via hook ──────────────────────────────────
         image_hidden_states = capture_image_features(model, inputs)  # (n_tiles, 64, 576)
 
         # ── Infer actual tile layout from captured features ──────────────────
-        n_actual_tiles = image_hidden_states.shape[0]   # e.g. 17
+        n_actual_tiles = image_hidden_states.shape[0]   # e.g. 13
         n_local        = n_actual_tiles - 1              # subtract global tile
-        n_local_side   = max(1, int(n_local ** 0.5))     # e.g. sqrt(16) = 4
+        n_local_side   = max(1, int(n_local ** 0.5))     # e.g. sqrt(12) ≈ 3
 
         # ── Tile selection by gaze ───────────────────────────────────────────
         pruner = TilePruner(n_local_tiles_side=n_local_side, keep_ratio=keep_ratio)
@@ -156,6 +152,7 @@ def run_one(
         )
         seq_len    = new_ids.shape[-1]
         tiles_kept = len(kept)
+        tiles_total = n_actual_tiles
     else:
         gen_inputs = dict(
             input_ids=inputs["input_ids"],
@@ -164,7 +161,10 @@ def run_one(
             pixel_attention_mask=inputs["pixel_attention_mask"],
         )
         seq_len    = inputs["input_ids"].shape[-1]
-        tiles_kept = N_TILES_TOTAL
+        # infer tile count from sequence length (image tokens ÷ 64)
+        n_img_tok  = (inputs["input_ids"][0] == image_token_id).sum().item()
+        tiles_total = n_img_tok // TOKENS_PER_TILE
+        tiles_kept  = tiles_total
 
     # ── Generate ─────────────────────────────────────────────────────────────
     t0 = time.perf_counter()
@@ -180,10 +180,10 @@ def run_one(
     answer = processor.decode(outputs[0][seq_len:], skip_special_tokens=True)
 
     return {
-        "tiles_kept":   tiles_kept,
-        "tiles_total":  N_TILES_TOTAL,
-        "vis_tok_kept": tiles_kept * TOKENS_PER_TILE,
-        "vis_tok_total": TOTAL_VIS_TOKENS,
+        "tiles_kept":    tiles_kept,
+        "tiles_total":   tiles_total,
+        "vis_tok_kept":  tiles_kept  * TOKENS_PER_TILE,
+        "vis_tok_total": tiles_total * TOKENS_PER_TILE,
         "output_tokens": n_out,
         "total_s":       round(elapsed, 4),
         "ms_per_token":  round(elapsed * 1000 / max(n_out, 1), 2),
@@ -192,68 +192,65 @@ def run_one(
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Per-take runner
 # ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--n_frames",      type=int,   default=8,
-                        help="Number of frames to sample (default 8)")
-    parser.add_argument("--max_new_tokens", type=int,  default=64)
-    parser.add_argument("--prompt", default="What is the person doing in this scene?")
-    args = parser.parse_args()
-
-    take_dir  = os.path.join(DATA_ROOT, TAKE)
+def run_take(take: str, processor, model, device: str, args) -> str:
+    """Run the experiment for a single take. Returns path to CSV."""
+    take_dir   = os.path.join(DATA_ROOT, take)
     frames_dir = os.path.join(take_dir, "frames")
     gaze_csv   = os.path.join(take_dir, "eye_gaze", "general_eye_gaze_2d.csv")
 
+    if not os.path.isdir(frames_dir):
+        print(f"[SKIP] {take}: no frames directory at {frames_dir}")
+        return None
+
     # ── Load gaze data ───────────────────────────────────────────────────────
     gaze_df = pd.read_csv(gaze_csv).set_index("frame_num")
-    print(f"Gaze CSV: {len(gaze_df)} rows  |  x ∈ [{gaze_df['x'].min():.0f}, {gaze_df['x'].max():.0f}]"
-          f"  y ∈ [{gaze_df['y'].min():.0f}, {gaze_df['y'].max():.0f}]")
-    print(f"Normalising gaze by Aria sensor resolution {ARIA_W}×{ARIA_H}\n")
+    print(f"\n{'='*60}")
+    print(f"Take: {take}")
+    print(f"Gaze CSV: {len(gaze_df)} rows  |  "
+          f"x ∈ [{gaze_df['x'].min():.0f}, {gaze_df['x'].max():.0f}]  "
+          f"y ∈ [{gaze_df['y'].min():.0f}, {gaze_df['y'].max():.0f}]")
+    print(f"Normalising gaze by Aria sensor resolution {ARIA_W}×{ARIA_H}")
 
-    # ── Sample frames ────────────────────────────────────────────────────────
-    # Extracted files are frame_0001.jpg … frame_0064.jpg
-    # frame_NNNN.jpg → gaze frame_num = NNNN - 1
+    # ── Sample frames ─────────────────────────────────────────────────────────
     all_frames = sorted(f for f in os.listdir(frames_dir) if f.endswith(".jpg"))
-    step = max(1, len(all_frames) // args.n_frames)
-    sampled = all_frames[::step][: args.n_frames]
-    print(f"Sampling {len(sampled)} / {len(all_frames)} frames: {sampled}\n")
+    if args.n_frames == 0 or args.n_frames >= len(all_frames):
+        sampled = all_frames
+    else:
+        step    = max(1, len(all_frames) // args.n_frames)
+        sampled = all_frames[::step][: args.n_frames]
+    print(f"Using {len(sampled)} / {len(all_frames)} frames\n")
 
-    # ── Load model ───────────────────────────────────────────────────────────
-    device = get_device()
-    processor, model = load_model(MODEL_ID, device)
-
-    # ── Run experiment ───────────────────────────────────────────────────────
-    os.makedirs("results", exist_ok=True)
+    # ── CSV output ────────────────────────────────────────────────────────────
+    results_path = f"results/{take}_experiment.csv"
     fieldnames = [
-        "frame", "frame_num", "gaze_x_px", "gaze_y_px",
+        "take", "frame", "frame_num", "gaze_x_px", "gaze_y_px",
         "gaze_x_norm", "gaze_y_norm",
         "keep_ratio", "tiles_kept", "tiles_total",
         "vis_tok_kept", "vis_tok_total",
         "output_tokens", "total_s", "ms_per_token", "answer",
     ]
-    csvfile = open(RESULTS_PATH, "w", newline="")
+    csvfile = open(results_path, "w", newline="")
     writer  = csv.DictWriter(csvfile, fieldnames=fieldnames)
     writer.writeheader()
 
-    print(f"{'Frame':<20} {'keep':>5} {'tiles':>6} {'vis_tok':>8} "
+    print(f"{'Frame':<20} {'keep':>5} {'tiles':>8} {'vis_tok':>10} "
           f"{'time_s':>7} {'ms/tok':>8}  answer")
     print("-" * 100)
 
     for fname in sampled:
         frame_idx = int(fname.replace("frame_", "").replace(".jpg", ""))
         # Gaze CSV is at 10 fps; frames were extracted at 1 fps (every 10th gaze frame)
-        # frame_0001 → gaze frame_num 0, frame_0002 → 10, frame_0003 → 20, etc.
         frame_num = (frame_idx - 1) * 10
 
-        # Gaze lookup — clamp to [0, 1] in case coords exceed frame bounds
+        # Gaze lookup — fallback to image center if missing
         if frame_num in gaze_df.index:
             gx_px = gaze_df.loc[frame_num, "x"]
             gy_px = gaze_df.loc[frame_num, "y"]
         else:
-            gx_px, gy_px = ARIA_W / 2, ARIA_H / 2   # fallback: center
+            gx_px, gy_px = ARIA_W / 2, ARIA_H / 2
 
         gx_norm = float(min(max(gx_px / ARIA_W, 0.0), 1.0))
         gy_norm = float(min(max(gy_px / ARIA_H, 0.0), 1.0))
@@ -266,20 +263,20 @@ def main():
                 keep_ratio=kr, gaze_x=gx_norm, gaze_y=gy_norm,
                 max_new_tokens=args.max_new_tokens,
             )
-            label = "baseline" if kr == 1.0 else f"gaze_{kr:.0%}"
-            print(f"{fname:<20} {kr:>5.2f} {res['tiles_kept']:>6}/{res['tiles_total']}"
-                  f" {res['vis_tok_kept']:>5}/{res['vis_tok_total']}"
+            print(f"{fname:<20} {kr:>5.2f} {res['tiles_kept']:>4}/{res['tiles_total']:<3}"
+                  f" {res['vis_tok_kept']:>5}/{res['vis_tok_total']:<5}"
                   f" {res['total_s']:>7.3f}s {res['ms_per_token']:>7.1f}ms"
                   f"  {res['answer'][:60]}")
 
             writer.writerow({
-                "frame":        fname,
-                "frame_num":    frame_num,
-                "gaze_x_px":    round(gx_px, 1),
-                "gaze_y_px":    round(gy_px, 1),
-                "gaze_x_norm":  round(gx_norm, 4),
-                "gaze_y_norm":  round(gy_norm, 4),
-                "keep_ratio":   kr,
+                "take":        take,
+                "frame":       fname,
+                "frame_num":   frame_num,
+                "gaze_x_px":   round(gx_px, 1),
+                "gaze_y_px":   round(gy_px, 1),
+                "gaze_x_norm": round(gx_norm, 4),
+                "gaze_y_norm": round(gy_norm, 4),
+                "keep_ratio":  kr,
                 **res,
             })
             csvfile.flush()
@@ -288,23 +285,72 @@ def main():
 
     csvfile.close()
 
-    # ── Summary table ─────────────────────────────────────────────────────────
-    df = pd.read_csv(RESULTS_PATH)
+    # ── Per-take summary ──────────────────────────────────────────────────────
+    df = pd.read_csv(results_path)
     summary = (
-        df.groupby("keep_ratio")[["vis_tok_kept", "total_s", "ms_per_token"]]
+        df.groupby("keep_ratio")[["tiles_kept", "vis_tok_kept", "total_s", "ms_per_token"]]
         .mean()
         .sort_index(ascending=False)
         .rename(columns={
+            "tiles_kept":   "avg_tiles",
             "vis_tok_kept": "avg_vis_tokens",
             "total_s":      "avg_time_s",
             "ms_per_token": "avg_ms_per_tok",
         })
     )
     baseline_time = summary.loc[1.0, "avg_time_s"]
-    summary["speedup_vs_baseline"] = (baseline_time / summary["avg_time_s"]).round(2)
-    print("\n===== SUMMARY (averaged over frames) =====")
+    summary["speedup"] = (baseline_time / summary["avg_time_s"]).round(2)
+    print(f"\n===== SUMMARY: {take} ({len(sampled)} frames) =====")
     print(summary.to_string())
-    print(f"\nFull results saved → {RESULTS_PATH}")
+    print(f"\nFull results → {results_path}")
+
+    return results_path
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--takes", nargs="+", default=ALL_TAKES,
+        help="Which takes to run (default: all available takes)"
+    )
+    parser.add_argument(
+        "--n_frames", type=int, default=0,
+        help="Frames to sample per take; 0 = all frames (default)"
+    )
+    parser.add_argument("--max_new_tokens", type=int, default=64)
+    parser.add_argument("--prompt", default="What is the person doing in this scene?")
+    args = parser.parse_args()
+
+    device = get_device()
+    processor, model = load_model(MODEL_ID, device)
+
+    result_paths = []
+    for take in args.takes:
+        path = run_take(take, processor, model, device, args)
+        if path:
+            result_paths.append(path)
+
+    # ── Combined summary across all takes ─────────────────────────────────────
+    if len(result_paths) > 1:
+        combined = pd.concat([pd.read_csv(p) for p in result_paths], ignore_index=True)
+        summary = (
+            combined.groupby("keep_ratio")[["vis_tok_kept", "total_s", "ms_per_token"]]
+            .mean()
+            .sort_index(ascending=False)
+            .rename(columns={
+                "vis_tok_kept": "avg_vis_tokens",
+                "total_s":      "avg_time_s",
+                "ms_per_token": "avg_ms_per_tok",
+            })
+        )
+        baseline_time = summary.loc[1.0, "avg_time_s"]
+        summary["speedup"] = (baseline_time / summary["avg_time_s"]).round(2)
+        print("\n===== COMBINED SUMMARY (all takes) =====")
+        print(summary.to_string())
 
 
 if __name__ == "__main__":
