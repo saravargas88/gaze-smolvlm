@@ -44,9 +44,10 @@ N_TILES_TOTAL    = 17    # 1 global + 4×4 local
 TOKENS_PER_TILE  = 64   # 8×8 after pixel shuffle
 TOTAL_VIS_TOKENS = N_TILES_TOTAL * TOKENS_PER_TILE  # 1 088
 
-# Ego-camera frame resolution (the extracted JPGs)
-FRAME_W = 796
-FRAME_H = 448
+# Aria RGB camera native resolution — gaze 2D coords are in this space
+# (the extracted JPGs are 796×448 but gaze is projected onto the full 1408×1408 sensor)
+ARIA_W = 1408
+ARIA_H = 1408
 
 KEEP_RATIOS = [1.0, 0.75, 0.50, 0.25]
 
@@ -177,7 +178,7 @@ def main():
     gaze_df = pd.read_csv(gaze_csv).set_index("frame_num")
     print(f"Gaze CSV: {len(gaze_df)} rows  |  x ∈ [{gaze_df['x'].min():.0f}, {gaze_df['x'].max():.0f}]"
           f"  y ∈ [{gaze_df['y'].min():.0f}, {gaze_df['y'].max():.0f}]")
-    print(f"Normalising gaze by frame size {FRAME_W}×{FRAME_H}\n")
+    print(f"Normalising gaze by Aria sensor resolution {ARIA_W}×{ARIA_H}\n")
 
     # ── Sample frames ────────────────────────────────────────────────────────
     # Extracted files are frame_0001.jpg … frame_0064.jpg
@@ -210,7 +211,9 @@ def main():
 
     for fname in sampled:
         frame_idx = int(fname.replace("frame_", "").replace(".jpg", ""))
-        frame_num = frame_idx - 1          # CSV is 0-indexed
+        # Gaze CSV is at 10 fps; frames were extracted at 1 fps (every 10th gaze frame)
+        # frame_0001 → gaze frame_num 0, frame_0002 → 10, frame_0003 → 20, etc.
+        frame_num = (frame_idx - 1) * 10
 
         # Gaze lookup — clamp to [0, 1] in case coords exceed frame bounds
         if frame_num in gaze_df.index:
@@ -219,8 +222,8 @@ def main():
         else:
             gx_px, gy_px = FRAME_W / 2, FRAME_H / 2   # fallback: center
 
-        gx_norm = float(min(max(gx_px / FRAME_W, 0.0), 1.0))
-        gy_norm = float(min(max(gy_px / FRAME_H, 0.0), 1.0))
+        gx_norm = float(min(max(gx_px / ARIA_W, 0.0), 1.0))
+        gy_norm = float(min(max(gy_px / ARIA_H, 0.0), 1.0))
 
         image = Image.open(os.path.join(frames_dir, fname)).convert("RGB")
 
