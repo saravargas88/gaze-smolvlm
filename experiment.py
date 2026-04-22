@@ -102,8 +102,7 @@ def run_one(
         # ── Vision encoder ──────────────────────────────────────────────────
         with torch.no_grad():
             image_hidden_states = model.model.vision_model(
-                pixel_values=inputs["pixel_values"].to(torch.float16),
-                pixel_attention_mask=inputs["pixel_attention_mask"],
+                pixel_values=inputs["pixel_values"].to(torch.float16)
             ).last_hidden_state                      # (n_tiles, 64, 576)
 
         # ── Tile selection by gaze ───────────────────────────────────────────
