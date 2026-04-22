@@ -339,10 +339,12 @@ class TilePruner:
         pruned_hidden_states = image_hidden_states[kept]   # (n_kept, 64, 576)
 
         # --- Prune the text sequence side ---
-        # Find where the <image> tokens are in input_ids (they're contiguous)
-        ids = input_ids[0]                                 # (seq_len,)
-        image_mask = ids == image_token_id                 # True at every <image> position
-        image_positions = image_mask.nonzero(as_tuple=True)[0]  # all <image> indices
+        # Move to CPU for indexing — MPS has limitations with nonzero/advanced indexing
+        ids      = input_ids[0].cpu()
+        attn_cpu = attention_mask[0].cpu()
+
+        image_mask      = ids == image_token_id
+        image_positions = image_mask.nonzero(as_tuple=False).squeeze(1)  # (n_image_tokens,)
 
         # Drop the LAST tokens_to_drop image positions.
         # (Tile order in the sequence matches tile order in image_hidden_states,
@@ -351,8 +353,8 @@ class TilePruner:
         keep_mask = torch.ones(ids.shape[0], dtype=torch.bool)
         keep_mask[drop_positions] = False
 
-        new_input_ids = ids[keep_mask].unsqueeze(0)
-        new_attention_mask = attention_mask[0][keep_mask].unsqueeze(0)
+        new_input_ids     = ids[keep_mask].unsqueeze(0)
+        new_attention_mask = attn_cpu[keep_mask].unsqueeze(0)
 
         return pruned_hidden_states, new_input_ids, new_attention_mask, kept
 
