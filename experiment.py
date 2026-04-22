@@ -58,32 +58,28 @@ RESULTS_PATH = "results/preliminary_experiment.csv"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def encode_images(model, pixel_values: torch.Tensor, pixel_attention_mask: torch.Tensor) -> torch.Tensor:
+def encode_images(model, pixel_values: torch.Tensor) -> torch.Tensor:
     """
     Vision encoder + connector, compatible with all transformers versions.
-    Replicates what Idefics3Model.get_image_features() does internally.
+
+    Runs vision_model + connector directly without a patch_attention_mask —
+    for a real (non-padded) image all patches are valid so no mask is needed.
 
     Returns shape: (n_tiles, tokens_per_tile, llm_hidden_dim)  e.g. (17, 64, 576)
     """
     m = model.model   # Idefics3Model
     batch_size, num_tiles, C, H, W = pixel_values.shape
 
-    # Flatten tiles into batch dim — skip padding filter since we always
-    # have a single real image (filtering can drop dark tiles and break indexing)
+    # Flatten tiles into batch dim
     pv = pixel_values.to(dtype=torch.float16).view(batch_size * num_tiles, C, H, W)
-    pm = pixel_attention_mask.view(batch_size * num_tiles, H, W)
 
-    # Build patch-level attention mask for the vision transformer
-    patch_size = m.config.vision_config.patch_size
-    grid = pm.unfold(1, patch_size, patch_size).unfold(2, patch_size, patch_size)
-    patch_mask = (grid.sum(dim=(-1, -2)) > 0).bool()
+    # Run SigLIP vision encoder — no patch_attention_mask needed for real images
+    vision_out = m.vision_model(pixel_values=pv, return_dict=True)
 
-    # Run SigLIP vision encoder
-    vision_out = m.vision_model(
-        pixel_values=pv, patch_attention_mask=patch_mask, return_dict=True
-    )
     # Run connector/projector → LLM hidden dim
     image_features = m.connector(vision_out.last_hidden_state)
+
+    print(f"  [debug] pixel_values: {pixel_values.shape} → image_features: {image_features.shape}")
     return image_features   # (n_tiles, 64, 576)
 
 
@@ -133,7 +129,6 @@ def run_one(
             image_hidden_states = encode_images(
                 model,
                 inputs["pixel_values"],
-                inputs["pixel_attention_mask"],
             )                                        # (n_tiles, 64, 576)
 
         # ── Tile selection by gaze ───────────────────────────────────────────
