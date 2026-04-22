@@ -27,6 +27,7 @@ dependencies = [
     "tqdm>=4.0.0",
     "wandb>=0.26.0",
     "matplotlib>=3.10.8",
+    "bert-score>=0.3.13",
 ]
 
 [dependency-groups]

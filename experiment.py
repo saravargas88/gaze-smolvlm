@@ -287,21 +287,37 @@ def run_take(take: str, processor, model, device: str, args) -> str:
 
     # ── Per-take summary ──────────────────────────────────────────────────────
     df = pd.read_csv(results_path)
-    summary = (
-        df.groupby("keep_ratio")[["tiles_kept", "vis_tok_kept", "total_s", "ms_per_token"]]
-        .mean()
-        .sort_index(ascending=False)
-        .rename(columns={
-            "tiles_kept":   "avg_tiles",
-            "vis_tok_kept": "avg_vis_tokens",
-            "total_s":      "avg_time_s",
-            "ms_per_token": "avg_ms_per_tok",
-        })
-    )
+    grp = df.groupby("keep_ratio")
+    means = grp[["tiles_kept", "vis_tok_kept", "total_s", "ms_per_token"]].mean()
+    stds  = grp[["total_s", "ms_per_token"]].std()
+
+    summary = means.sort_index(ascending=False).rename(columns={
+        "tiles_kept":   "avg_tiles",
+        "vis_tok_kept": "avg_vis_tokens",
+        "total_s":      "avg_time_s",
+        "ms_per_token": "avg_ms_per_tok",
+    })
+    summary["std_time_s"]    = stds["total_s"].sort_index(ascending=False)
+    summary["std_ms_per_tok"] = stds["ms_per_token"].sort_index(ascending=False)
+
     baseline_time = summary.loc[1.0, "avg_time_s"]
     summary["speedup"] = (baseline_time / summary["avg_time_s"]).round(2)
+
+    # Format time as mean ± std for readability
+    summary["time (mean±std)"] = (
+        summary["avg_time_s"].map(lambda v: f"{v:.3f}")
+        + " ± "
+        + summary["std_time_s"].map(lambda v: f"{v:.3f}")
+    )
+    summary["ms/tok (mean±std)"] = (
+        summary["avg_ms_per_tok"].map(lambda v: f"{v:.2f}")
+        + " ± "
+        + summary["std_ms_per_tok"].map(lambda v: f"{v:.2f}")
+    )
+
     print(f"\n===== SUMMARY: {take} ({len(sampled)} frames) =====")
-    print(summary.to_string())
+    print(summary[["avg_tiles", "avg_vis_tokens",
+                   "time (mean±std)", "ms/tok (mean±std)", "speedup"]].to_string())
     print(f"\nFull results → {results_path}")
 
     return results_path
@@ -337,20 +353,33 @@ def main():
     # ── Combined summary across all takes ─────────────────────────────────────
     if len(result_paths) > 1:
         combined = pd.concat([pd.read_csv(p) for p in result_paths], ignore_index=True)
-        summary = (
-            combined.groupby("keep_ratio")[["vis_tok_kept", "total_s", "ms_per_token"]]
-            .mean()
-            .sort_index(ascending=False)
-            .rename(columns={
-                "vis_tok_kept": "avg_vis_tokens",
-                "total_s":      "avg_time_s",
-                "ms_per_token": "avg_ms_per_tok",
-            })
-        )
+        grp   = combined.groupby("keep_ratio")
+        means = grp[["vis_tok_kept", "total_s", "ms_per_token"]].mean()
+        stds  = grp[["total_s", "ms_per_token"]].std()
+
+        summary = means.sort_index(ascending=False).rename(columns={
+            "vis_tok_kept": "avg_vis_tokens",
+            "total_s":      "avg_time_s",
+            "ms_per_token": "avg_ms_per_tok",
+        })
+        summary["std_time_s"]     = stds["total_s"].sort_index(ascending=False)
+        summary["std_ms_per_tok"] = stds["ms_per_token"].sort_index(ascending=False)
+
         baseline_time = summary.loc[1.0, "avg_time_s"]
         summary["speedup"] = (baseline_time / summary["avg_time_s"]).round(2)
+        summary["time (mean±std)"] = (
+            summary["avg_time_s"].map(lambda v: f"{v:.3f}")
+            + " ± "
+            + summary["std_time_s"].map(lambda v: f"{v:.3f}")
+        )
+        summary["ms/tok (mean±std)"] = (
+            summary["avg_ms_per_tok"].map(lambda v: f"{v:.2f}")
+            + " ± "
+            + summary["std_ms_per_tok"].map(lambda v: f"{v:.2f}")
+        )
         print("\n===== COMBINED SUMMARY (all takes) =====")
-        print(summary.to_string())
+        print(summary[["avg_vis_tokens", "time (mean±std)",
+                        "ms/tok (mean±std)", "speedup"]].to_string())
 
 
 if __name__ == "__main__":
